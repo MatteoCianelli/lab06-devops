@@ -1,0 +1,86 @@
+name: CI-CD Lab06
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: Integracion continua
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Ejecutar pruebas basicas
+        run: |
+          chmod +x scripts/test.sh
+          ./scripts/test.sh
+
+      - name: Empaquetar aplicacion
+        run: |
+          tar -czf lab06-app.tar.gz app/
+
+      - name: Publicar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lab06-app
+          path: lab06-app.tar.gz
+
+  cd:
+    name: Despliegue continuo
+    needs: ci
+    runs-on: ubuntu-latest
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Descargar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lab06-app
+
+      - name: Configurar clave SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AZURE_VM_SSH_KEY }}" > ~/.ssh/lab06_key
+          chmod 600 ~/.ssh/lab06_key
+          ssh-keyscan -H "${{ secrets.AZURE_VM_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Copiar paquete a la VM
+        run: |
+          scp -i ~/.ssh/lab06_key lab06-app.tar.gz \
+          "${{ secrets.AZURE_VM_USER }}@${{ secrets.AZURE_VM_HOST }}:/tmp/lab06-app.tar.gz"
+
+      - name: Desplegar en la VM
+        run: |
+          ssh -i ~/.ssh/lab06_key "${{ secrets.AZURE_VM_USER }}@${{ secrets.AZURE_VM_HOST }}" << 'EOF'
+            set -e
+
+            echo "Preparando directorio temporal..."
+            rm -rf /tmp/lab06-release
+            mkdir -p /tmp/lab06-release
+
+            echo "Descomprimiendo artifact..."
+            tar -xzf /tmp/lab06-app.tar.gz -C /tmp/lab06-release
+
+            echo "Copiando archivos a Nginx..."
+            rsync -av --delete /tmp/lab06-release/app/ /var/www/html/
+
+            echo "Recargando Nginx..."
+            sudo nginx -t
+            sudo systemctl reload nginx
+
+            echo "Validando despliegue local..."
+            curl -fsS http://localhost | grep -q "Hola Mundo DevOps"
+
+            echo "Despliegue finalizado correctamente."
+          EOF
+
+      - name: Validar URL publica
+        run: |
+          curl -fsS "http://${{ secrets.AZURE_VM_HOST }}" | grep -q "Hola Mundo DevOps"
